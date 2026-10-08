@@ -542,6 +542,15 @@ def resolve_state_approval(
     registry = decisions_for(state)
     decision_id = state_approval_decision_id(request_id)
     session_key = str(record.get("slot") or "state")
+    future = getattr(state, "_approval_futures", {}).get(request_id)
+    if future is not None and future.done():
+        # This instance is already settled and only awaits its cleanup. Its
+        # decision is the winner's: classify against it, never reopen it, or a
+        # second click would replace the winner's record with a pending one.
+        late = registry.classify_late(decision_id, response_id, request_principal(request))
+        if late.decision is None:
+            return None
+        return lost_race_reply(late, response_id)
     registry.open(
         decision_id,
         DecisionKind.APPROVAL,
