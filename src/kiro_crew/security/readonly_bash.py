@@ -1577,6 +1577,28 @@ def _runs_git_at_a_command_position(words: list[str]) -> bool:
     return False
 
 
+def command_names_git(cmd: str) -> bool:
+    """Whether ``cmd`` may run ``git``: the no-approver hook surface's fail-closed check.
+
+    Deliberately the crudest check there is: ``git`` anywhere in the text, with the
+    quotes and backslashes the shell removes taken out first and a line continuation
+    folded, refuses the command. No word, program or shell grammar is parsed, so no
+    quoting, escaping, path, ``.exe`` or wrapper spelling can place ``git`` outside it.
+    A name the shell or a program writes at run time is not seen and keeps the
+    default, like ``$EDITOR notes``: a glob, brace list or extglob that expands to git
+    (``/usr/bin/g?t``, ``{g,}it``, ``+(gi)t``), an ANSI-C ``$'\\x67it'``, an expansion
+    or substitution (``${x}t``, ``$(printf g)it``, a backtick), or a program that
+    writes and runs it (``base64 -d | sh``, ``python -c``). The owner accepted that
+    residual rather than refuse every command holding those characters. The cost is
+    that a command that only mentions git in any token is refused too (``grep -rn git
+    docs/``, ``grep digit``); an operator lifts that for the surface by granting the
+    command in the hook's ``auto_approve_tools``.
+    """
+    unquoted = cmd.replace("\\\n", "").replace("'", "").replace('"', "")
+    readings = (cmd, unquoted.replace("\\", ""), unquoted.replace("\\", "/"))
+    return any("git" in text.casefold() for text in readings)
+
+
 def writes_through_redirect(cmd: str) -> bool:
     """Whether ``cmd`` writes through a redirect: :func:`_classify_bash`'s rule alone.
 

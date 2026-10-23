@@ -655,7 +655,13 @@ def _url_payload_command(n: int) -> str:
 #: use in ``_DenyWaiver``: it keeps every self-protection floor, the unverifiable
 #: push key and every self-protection or credential-exfil rule out of the override
 #: entirely, so the change only narrows what can be waived.
-_PACKAGE_LINE_BUDGET = 33_959
+#: Raised by 22 more, to the true count 33,981, for
+#: ``readonly_bash.command_names_git``, the no-approver hook surface's fail-closed
+#: git check: it folds a line continuation, removes the quotes and backslashes the
+#: shell removes, and refuses whenever ``git`` is left anywhere in the text. It is a
+#: plain substring test that parses no shell grammar, so it refuses more than it
+#: must rather than less.
+_PACKAGE_LINE_BUDGET = 33_981
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
