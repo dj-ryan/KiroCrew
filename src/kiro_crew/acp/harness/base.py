@@ -333,6 +333,14 @@ class SessionExtras:
     stubs from the session-level array. Empty on every other host.
     """
 
+    main_spec_episode: tuple[int, bool] | None = None
+    """The unreadable-main-spec episode reading the payload above was built against.
+
+    Taken before the host's gate and its spec read (``agent.main_spec_episode``).
+    The session open is checked against it right before its send
+    (``AcpRuntime._send_session_open``). ``None`` when the host builds no payload.
+    """
+
 
 # ── Seam 5: notification aliases ──
 
