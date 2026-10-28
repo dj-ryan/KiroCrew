@@ -9,6 +9,7 @@ prompt gets it ordered *before* the history the resume then appends.
 import asyncio
 import threading
 import time
+from unittest.mock import MagicMock, call
 
 import pytest
 from aiohttp import web
@@ -1380,3 +1381,45 @@ def test_flush_failure_at_construction_does_not_leak_the_reservation(tmp_path, m
     assert "flush-leak-1" not in state._slots, "leaked a registered slot on flush failure"
     assert state.live_slot_count() == before, "leaked a construction reservation"
     assert "flush-leak-1" not in state._slots_under_construction
+
+
+@pytest.mark.asyncio
+async def test_resuming_a_closed_session_refreshes_the_older_sessions_listing(
+    tmp_path, monkeypatch
+):
+    """A resume moves the session out of Older Sessions, which every tab re-reads
+    only on a ``history`` frame: the resume pushes exactly one."""
+    monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+    state = _make_state(tmp_path)
+    log = state.conversation_log
+    key = "dashboard:listed1"
+    log.append(key, "user", "history-1")
+    log.update_metadata(key, {"closed": True, "closed_at": 1_700_000_000.0})
+    push_refresh = MagicMock()
+    monkeypatch.setattr(state, "push_refresh", push_refresh)
+
+    async with TestClient(TestServer(_make_app(state))) as client:
+        resp = await client.post("/api/chat/slots/listed1/resume", json={"key": key})
+
+    assert resp.status == 200, f"resume did not publish (status {resp.status})"
+    assert "listed1" in state._slots, "the slot was not published"
+    assert push_refresh.call_args_list.count(call("history")) == 1, push_refresh.call_args_list
+
+
+@pytest.mark.asyncio
+async def test_resuming_an_already_live_session_pushes_no_history_refresh(tmp_path, monkeypatch):
+    """A resume answered by the open slot publishes nothing new, so the listing
+    has not changed and no ``history`` frame is sent."""
+    monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+    state = _make_state(tmp_path)
+    live = state.get_or_create_slot("open1")
+    push_refresh = MagicMock()
+    monkeypatch.setattr(state, "push_refresh", push_refresh)
+
+    async with TestClient(TestServer(_make_app(state))) as client:
+        resp = await client.post("/api/chat/slots/open1/resume", json={"key": "dashboard:open1"})
+        data = await resp.json()
+
+    assert resp.status == 200, f"resume of a live slot failed (status {resp.status})"
+    assert data["key"] == live.key and state._slots["open1"] is live, "not the dedup answer"
+    assert call("history") not in push_refresh.call_args_list, push_refresh.call_args_list

@@ -1557,6 +1557,8 @@ async def _reconcile_channel_slots_locked(
 
             _sync_dashboard_slots(state)
         state.push_slots_update()
+        if surfaced:  # a surfaced session leaves Older Sessions, re-read only on ``history``
+            state.push_refresh("history")
     return surfaced, complete
 
 

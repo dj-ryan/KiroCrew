@@ -862,6 +862,8 @@ async def resume_slot_from_history(
     if registered and state._slots.get(noted_key) is not outcome.slot:  # after the last await
         deleted = "the session was deleted while it was being resumed"
         return ResumeOutcome(refusal=ResumeRefusal(deleted, "resume_session_deleted", 409))
+    if registered:  # it left Older Sessions, which tabs re-read only on ``history``
+        state.push_refresh("history")
     return outcome
 
 

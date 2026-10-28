@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from kiro_crew.dashboard.listener_guard import ListenerGuard
     from kiro_crew.dashboard.loop_watchdog import LoopStallWatchdog
     from kiro_crew.dashboard.state_parts.chat_slot import _ChatSlot
+    from kiro_crew.dashboard.state_parts.refresh_coalesce import RefreshCoalescer
     from kiro_crew.messaging.transport import MessagingTransport
     from kiro_crew.power import SleepInhibitor
     from kiro_crew.slack.outbound import PostedOptions
@@ -164,6 +165,8 @@ class DashboardState:
     _slots_broadcast_lock: "threading.Lock | None" = None
 
     _slots_broadcast_timer: "asyncio.TimerHandle | None" = None
+
+    _refresh_coalescer: "RefreshCoalescer | None" = None
 
     _slots_broadcast_last: float = 0.0
 
