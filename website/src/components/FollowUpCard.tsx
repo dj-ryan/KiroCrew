@@ -1,5 +1,5 @@
-import { memo, useEffect, useRef, useState } from 'react'
-import { GitBranch, Lightbulb, MessageSquarePlus, Plus, X } from 'lucide-react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, GitBranch, Lightbulb, MessageSquarePlus, Plus, Send, X } from 'lucide-react'
 import type { FollowupItem } from '../store/chatSlice'
 import ErrorNotice from './ErrorNotice'
 import { reportUiControlClick } from '../lib/uiControlTelemetry'
@@ -14,18 +14,20 @@ export interface FollowUpCardProps {
    */
   onAddToSession: (item: FollowupItem, index: number) => void
   /**
-   * Create a git worktree, open a session scoped to it, and pre-fill that
-   * session's composer. On success only that one item leaves the card; its
-   * siblings stay. Rejects with a user-facing message on failure (branch
-   * exists, not a git repo, git unavailable) which the card renders inline.
+   * Create a git worktree, open a session scoped to it, and send the item's
+   * prompt there as its first message. Rejects with a user-facing message on
+   * failure (branch exists, not a git repo, git unavailable, send refused)
+   * which the card renders inline. Once the prompt is sent only that one item
+   * leaves the card; its siblings stay.
    */
   onStartInWorktree: (item: FollowupItem, index: number) => Promise<void>
   /**
    * Open a new session in this session's project directory (where a new chat
-   * starts by default when it has none) and pre-fill its composer, with no git
-   * involved. The primary action when there is no repository to branch from.
+   * starts by default when it has none) and send the item's prompt there as its
+   * first message, with no git involved. The primary action when there is no
+   * repository to branch from.
    * Rejects with a user-facing message on failure, rendered inline like the
-   * worktree route's. On success only that one item leaves the card.
+   * worktree route's. Once the prompt is sent only that one item leaves the card.
    */
   onStartInNewChat: (item: FollowupItem, index: number) => Promise<void>
   /** Drop this single suggestion; siblings stay. */
@@ -53,14 +55,35 @@ export interface FollowUpCardProps {
   enclosingRepoRoot?: string
 }
 
+// The collapsed card shows this many lines of each prompt. A prompt with more
+// lines, or one long enough to wrap past them, gets a Show prompt toggle.
+const PROMPT_PREVIEW_LINES = 3
+const PROMPT_PREVIEW_CHARS = 240
+
+/** The collapsed card's text: the first PROMPT_PREVIEW_LINES lines, cut at
+ *  PROMPT_PREVIEW_CHARS, with a trailing ellipsis that says more is hidden. */
+function followupPromptPreview(prompt: string): string {
+  const head = prompt.split('\n').slice(0, PROMPT_PREVIEW_LINES).join('\n')
+  return `${head.slice(0, PROMPT_PREVIEW_CHARS).trimEnd()}…`
+}
+
+/** Whether the collapsed card hides any of the prompt, so it needs Show prompt. */
+function followupPromptHasMore(prompt: string): boolean {
+  return prompt.split('\n').length > PROMPT_PREVIEW_LINES || prompt.length > PROMPT_PREVIEW_CHARS
+}
+
 /**
  * Agent-authored follow-up suggestions, rendered above the composer.
  *
- * Both non-skip actions PRE-FILL a composer rather than sending: the user
- * always sees the handoff prompt and presses send themselves, so a click can
- * never start an unattended turn. That is a deliberate product constraint, not
- * an implementation shortcut — see `suggest_followup` in mcp_core.py, whose
- * tool description promises the same thing to the model.
+ * Start (new worktree or new chat) SENDS the item's prompt as the new
+ * session's first message, so one click runs agent-authored text. That is why
+ * every item shows the first three lines of its prompt with no toggle, and
+ * Show prompt expands the rest (rfc-followup-start-sends.md, Decision 3): the
+ * title and description are a label the agent chose, and only the prompt is
+ * what runs.
+ * "Add to this session" PRE-FILLS this composer and sends nothing. The
+ * `suggest_followup` tool description (control_parts/schemas.py) states the
+ * same contract to the model.
  *
  * All item strings are LLM-authored. They are rendered as text children only
  * (never dangerouslySetInnerHTML), on top of the server-side sanitization and
@@ -78,10 +101,17 @@ function FollowUpCard({
 }: FollowUpCardProps) {
   useLanguageGeneration() // memo() bails out of the provider-level repaint; subscribe directly
   // Index of the item whose session is being opened, so only that row shows a
-  // pending state and double-clicks cannot fire two `worktree add` calls or
-  // open two chats.
+  // pending state and double-clicks cannot fire two `worktree add` calls, open
+  // two chats or send the prompt twice.
   const [busyIndex, setBusyIndex] = useState<number | null>(null)
   const [errors, setErrors] = useState<Record<number, string>>({})
+  // Which items have their prompt expanded. Index-keyed like `errors`, and
+  // reset with them when `items` changes.
+  const [shownPrompts, setShownPrompts] = useState<Record<number, boolean>>({})
+  const promptIdBase = useId()
+  // The footer says what Start does; both Start buttons point at it so a screen
+  // reader hears that Start sends, as the send glyph on the button shows.
+  const footerId = `${promptIdBase}-footer`
   // A project that is not a git repo, or is only a folder inside one, gets no
   // worktree action: the server refuses the first outright and the second
   // unless another session is scoped to the enclosing root. Both swap the
@@ -100,7 +130,7 @@ function FollowUpCard({
   // list's index. Each request captures the generation it started in and its
   // completion is ignored if that no longer matches.
   const itemsGen = useRef(0)
-  useEffect(() => { itemsGen.current += 1; setErrors({}) }, [items])
+  useEffect(() => { itemsGen.current += 1; setErrors({}); setShownPrompts({}) }, [items])
 
   const startSession = async (item: FollowupItem, index: number) => {
     if (busyIndex !== null) return
@@ -146,22 +176,46 @@ function FollowUpCard({
       {items.map((item, index) => {
         const busy = busyIndex === index
         const error = errors[index]
+        const promptShown = !!shownPrompts[index]
+        const promptId = `${promptIdBase}-prompt-${index}`
+        const promptHasMore = followupPromptHasMore(item.prompt)
         return (
           <div key={`${item.title}-${index}`} className={`px-4 py-3 ${index > 0 ? 'border-t border-border' : ''}`}>
             <div className="text-[13px] font-medium text-text">{item.title}</div>
             {item.description && (
               <div className="text-[12px] text-muted mt-1 leading-relaxed">{item.description}</div>
             )}
+            <div
+              id={promptId}
+              data-testid="followup-prompt"
+              className={`mt-1.5 rounded-md border border-border bg-bg px-2.5 py-2 font-mono text-[11px] leading-relaxed text-text whitespace-pre-wrap break-words ${promptShown ? 'max-h-48 overflow-y-auto' : ''}`}
+            >
+              {promptShown || !promptHasMore ? item.prompt : followupPromptPreview(item.prompt)}
+            </div>
+            {promptHasMore && (
+              <button
+                type="button"
+                onClick={() => setShownPrompts(prev => ({ ...prev, [index]: !prev[index] }))}
+                aria-expanded={promptShown}
+                aria-controls={promptId}
+                className="inline-flex items-center gap-1 mt-1 p-0 text-[11px] text-muted hover:text-text bg-transparent border-none cursor-pointer"
+              >
+                {promptShown ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
+                {promptShown ? i18nT('components.followUpCard.hide_prompt') : i18nT('components.followUpCard.show_prompt')}
+              </button>
+            )}
             <div className="flex flex-wrap items-center gap-2 mt-2.5">
               {canWorktree ? (
                 <button
                   onClick={() => startSession(item, index)}
                   disabled={busy || busyIndex !== null}
+                  aria-describedby={footerId}
                   title={i18nT('components.followUpCard.create_worktree_and_open_session', { path: projectDir })}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer transition-all disabled:opacity-40 disabled:cursor-not-allowed bg-accent text-accent-fg hover:bg-accent-hover border-none"
                 >
                   <GitBranch size={13} aria-hidden="true" />
                   {busy ? i18nT('components.followUpCard.creating_worktree') : i18nT('components.followUpCard.start_in_new_worktree')}
+                  <Send size={12} aria-hidden="true" className="opacity-80" />
                 </button>
               ) : (
                 // No repository to branch from, so the spawn route is a plain new
@@ -169,6 +223,7 @@ function FollowUpCard({
                 <button
                   onClick={() => startSession(item, index)}
                   disabled={busy || busyIndex !== null}
+                  aria-describedby={footerId}
                   title={
                     insideRepo
                       ? i18nT('components.followUpCard.open_new_chat_inside_repo', { path: projectDir, root: enclosingRepoRoot })
@@ -180,6 +235,7 @@ function FollowUpCard({
                 >
                   <MessageSquarePlus size={13} aria-hidden="true" />
                   {busy ? i18nT('components.followUpCard.opening_new_chat') : i18nT('components.followUpCard.start_in_new_chat')}
+                  <Send size={12} aria-hidden="true" className="opacity-80" />
                 </button>
               )}
               <button
@@ -214,14 +270,19 @@ function FollowUpCard({
           </div>
         )
       })}
-      <div className="px-4 pb-3 text-[11px] text-muted">
+      <div id={footerId} className="px-4 pb-3 text-[11px] text-muted">
         {/* The standard footer covers a session with no project directory.
             With one, the footer also says where the new chat opens; why no
             worktree is created lives in the tooltip, so the always-visible
             line stays in session terms. */}
-        {canWorktree || !notRepo
-          ? i18nT('components.followUpCard.both_actions_pre_fill_the_composer_nothing_is_se')
-          : i18nT('components.followUpCard.new_chat_footer_same_project_directory')}
+        {/* The worktree footer says, in plain terms, where Start sends (a new
+            session on its own copy of the project) and that this session is
+            left alone, so the person can decide without knowing git. */}
+        {canWorktree
+          ? i18nT('components.followUpCard.footer_worktree_start_sends')
+          : !notRepo
+            ? i18nT('components.followUpCard.footer_start_sends_add_prefills')
+            : i18nT('components.followUpCard.footer_start_sends_add_prefills_project_directory')}
       </div>
     </div>
   )
