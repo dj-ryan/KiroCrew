@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover — exercised by test_import_error_*
 from kiro_crew import aws_consent, stt
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard.origin import check_origin, mark_audit_claimed
+from kiro_crew.dashboard.stt_adapted_stream import _run_registered_session, run_codex_session
 from kiro_crew.dashboard.stt_stream_transcribe_args import (
     _client_identifies_languages,
     _transcribe_language_kwargs,
@@ -57,7 +58,7 @@ PROVIDER_LOCAL = "local"
 # re-decodes a rolling window on a resident whisper.cpp model in this process,
 # `apple` streams on-device via SpeechAnalyzer (macOS 26+), and `transcribe`
 # streams from AWS. The default is first.
-_STREAMING_PROVIDERS = (PROVIDER_LOCAL, "apple", "transcribe")
+_STREAMING_PROVIDERS = (PROVIDER_LOCAL, "apple", "transcribe", "codex")
 
 
 def streaming_providers() -> tuple[str, ...]:
@@ -1222,35 +1223,6 @@ async def _run_apple_session(
     )
 
 
-async def _run_registered_session(
-    ws: web.WebSocketResponse,
-    cfg: "KiroCrewConfig",
-    request: web.Request,
-    caller: str,
-) -> None:
-    """Drive an edition provider's ``open_stream()`` session through the ``apple`` loop.
-
-    Same events, redaction, endpointer, cap and audit; a raise while opening is
-    audited as a setup failure.
-    """
-    from kiro_crew import speech_providers
-
-    with _audited_setup(caller):
-        provider = speech_providers.stt_provider(cfg.stt.provider)
-        if provider is None or not speech_providers.streams(provider):
-            raise RuntimeError(f"STT provider {cfg.stt.provider!r} cannot stream")
-        endpointer = _build_endpointer(ws, cfg, request)
-        session = provider.open_stream(cfg.stt)
-    await _drive_helper_session(
-        ws,
-        caller,
-        session,
-        endpointer,
-        start_failure_code=lambda: _CODE_SESSION_FAILED,
-        label=f"STT provider {cfg.stt.provider!r}",
-    )
-
-
 async def _drive_helper_session(
     ws: web.WebSocketResponse,
     caller: str,
@@ -1309,7 +1281,10 @@ async def _drive_helper_session(
                 msg_text = str(event.get("message", "speech helper failed"))
                 _claim_fatal("error")
                 if not ws.closed:
-                    await _send_error(ws, msg_text, _CODE_SESSION_FAILED)
+                    code = event.get("code")
+                    await _send_error(
+                        ws, msg_text, code if isinstance(code, str) else _CODE_SESSION_FAILED
+                    )
                     try:
                         await ws.close()
                     except Exception:
@@ -1663,6 +1638,10 @@ async def api_ws_stt(request: web.Request) -> web.WebSocketResponse:
             # setup below, which is entirely AWS-specific (credentials, region,
             # billing deadline).
             await _run_apple_session(ws, cfg, request, caller)
+            return ws
+
+        if cfg.stt.provider == "codex":
+            await run_codex_session(ws, cfg, request, caller)
             return ws
 
         if cfg.stt.provider not in _STREAMING_PROVIDERS:

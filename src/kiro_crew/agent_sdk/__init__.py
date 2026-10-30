@@ -83,6 +83,11 @@ from kiro_crew.agent_sdk.backend_install import (
     probe_backend,
     probe_backends,
 )
+from kiro_crew.agent_sdk.backends import (
+    CODEX_CLI_ADAPTER_MISSING,
+    CODEX_CLI_OVERRIDE_UNUSABLE,
+    CODEX_CLI_UNRESOLVED,
+)
 from kiro_crew.agent_sdk.capabilities import (
     MODEL_NAMESPACE_ACP,
     UNKNOWN_BACKEND_CAPABILITIES,
@@ -119,6 +124,7 @@ from kiro_crew.agent_sdk.host_auth import (
 from kiro_crew.agent_sdk.native_commands import NativeCommandBatch, run_kiro_native_commands
 
 if TYPE_CHECKING:
+    from kiro_crew.acp.client_spawn_env import CodexCliResolution
     from kiro_crew.acp.managed_agent_shadow import AgentNameClaim
 
 
@@ -147,6 +153,14 @@ def agents_dir_competing_claim(
     return _claim(agent, agents_dir, own_file)
 
 
+def resolve_codex_cli() -> CodexCliResolution:
+    """The ``codex`` CLI the codex-acp adapter would run, or why it cannot be found."""
+    # Imported lazily: the ACP spawn module is heavy and imports back into this package.
+    from kiro_crew.acp.client_spawn_env import resolve_codex_cli as _resolve
+
+    return _resolve()
+
+
 def session_start_concurrency() -> int:
     """The configured ``agent.session_start_concurrency`` snapshot (off-loop caller)."""
     from kiro_crew.acp.runtime_start import _resolve_session_start_concurrency as _resolve
@@ -166,6 +180,10 @@ class AgentTurnUsage(Protocol):
 
 
 __all__ = [
+    "CODEX_CLI_ADAPTER_MISSING",
+    "CODEX_CLI_OVERRIDE_UNUSABLE",
+    "CODEX_CLI_UNRESOLVED",
+    "resolve_codex_cli",
     "session_start_concurrency",
     "tool_row_text",
     "agents_dir_competing_claim",
