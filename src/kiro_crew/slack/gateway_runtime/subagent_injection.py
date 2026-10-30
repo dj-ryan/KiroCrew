@@ -982,6 +982,12 @@ async def _inject_subagent_into_channel_parent(
     _collected = _verdict == INLINE_CONFIRMED
     _inject_failure_reasons: list[str] = []
     _sleep_before_retry = False
+    # Set once an attempt that timed out had already written its prompt. The
+    # timeout's reset keeps the parent's conversation, so the backend holds the
+    # completion; the next attempt asks it to continue rather than sending the
+    # completion a second time.
+    _completion_sent = False
+    _sent_session_id = ""
     for _attempt in range(1, _MAX_INJECT_ATTEMPTS + 1):
         if _collected:
             break
@@ -990,6 +996,7 @@ async def _inject_subagent_into_channel_parent(
             _sleep_before_retry = False
         _acquired = False
         _footer_client = None
+        _written_before: int | None = None
         try:
             logger.debug(
                 "Subagent %s: %s injection attempt %d/%d into %s",
@@ -1006,6 +1013,23 @@ async def _inject_subagent_into_channel_parent(
             if _inline_verdict(self.subagent_mgr, self.sessions, carried)[0] == INLINE_CONFIRMED:
                 _collected = True
                 break
+            # A provider that does not count its writes leaves this None, and its
+            # timed-out attempt is retried with the completion, as it always was.
+            _count = getattr(client, "prompts_written", None)
+            _written_before = _count if isinstance(_count, int) else None
+            _prompt_text = announce
+            # Only the backend session the timed-out prompt went to holds it. A
+            # resume keeps that session's id and a fresh session gets a new one,
+            # whichever claim (this one, or a queued message woken by the release)
+            # made it, so the id is compared rather than this claim's flags.
+            _sid = getattr(client, "session_id", "")
+            if _completion_sent and isinstance(_sid, str) and _sid == _sent_session_id:
+                _prompt_text = (
+                    f"[Sub-agent {info.id}] Your previous turn received this sub-agent's "
+                    f"completion report and was interrupted after {int(INJECTION_TIMEOUT)}s. "
+                    "The report is earlier in this conversation and is not repeated here. "
+                    "Continue from it and give your reply."
+                )
             _provider = self._cfg.agent.provider if hasattr(self, "_cfg") else "acp"
             if self.ctx_builder:
                 # The completion is injected into the PARENT's
@@ -1016,7 +1040,7 @@ async def _inject_subagent_into_channel_parent(
                 # consolidated into the parent's store.
                 msg, _ = await run_in_embed_pool(
                     self.ctx_builder.build_message,
-                    announce,
+                    _prompt_text,
                     is_new,
                     parent_key,
                     memory_store=_memory_store,
@@ -1029,7 +1053,7 @@ async def _inject_subagent_into_channel_parent(
                     skill_trigger_text="",
                 )
             else:
-                msg = announce
+                msg = _prompt_text
             response = await asyncio.wait_for(
                 self._inject_with_retry(info, client, msg, parent_key, _inject_label),
                 timeout=INJECTION_TIMEOUT,
@@ -1159,6 +1183,13 @@ async def _inject_subagent_into_channel_parent(
                 _MAX_INJECT_ATTEMPTS,
                 INJECTION_TIMEOUT,
             )
+            # Read before the reset below replaces the session's provider.
+            if _acquired and _written_before is not None:
+                _written_after = getattr(client, "prompts_written", None)
+                if isinstance(_written_after, int) and _written_after > _written_before:
+                    _sid = getattr(client, "session_id", "")
+                    _sent_session_id = _sid if isinstance(_sid, str) else ""
+                    _completion_sent = bool(_sent_session_id)
             if _acquired:
                 try:
                     await self.sessions.reset(parent_key)

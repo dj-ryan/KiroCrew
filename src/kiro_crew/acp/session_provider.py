@@ -97,6 +97,9 @@ class AcpSessionProvider(LLMProvider):
     """
 
     approval_withdrawable = True
+    # Class default, so a provider built without ``__init__`` (``__new__`` in
+    # tests, a copy) still counts from zero; ``stream`` sets the instance value.
+    _prompts_written: int = 0
 
     # Applying a dashboard MCP config change to this live session by re-sending
     # its projection: ``kiro_crew.acp.session_provider_mcp_reinject``.
@@ -733,6 +736,10 @@ class AcpSessionProvider(LLMProvider):
             send = functools.partial(send, allow_image=False)
         if timeout is not None:
             send = functools.partial(send, timeout=timeout)
+        # The handle this turn writes through, read after the reinjection above
+        # may have replaced it, so its count is the one this turn moves.
+        handle = self._handle
+        written_before = getattr(handle, "prompts_written", 0)
         emitted = False
         try:
             async with aclosing(
@@ -772,7 +779,23 @@ class AcpSessionProvider(LLMProvider):
             # it instead of hitting its generic `except Exception`.
             raise AcpError(str(exc)) from exc
         finally:
+            # Before the await below, so a turn cancelled mid-stream (a caller's
+            # timeout) still records a prompt that already went out.
+            written_after = getattr(handle, "prompts_written", 0)
+            if isinstance(written_before, int) and isinstance(written_after, int):
+                self._prompts_written += written_after - written_before
             await self._end_shared_turn(claim)
+
+    @property
+    def prompts_written(self) -> int:
+        """Prompts this provider's turns have written to the backend.
+
+        A turn counts once its prompt request is written, whether or not it then
+        finishes. A caller whose turn timed out compares this against a snapshot
+        taken before the turn to tell a prompt the backend received from one that
+        never left, and so avoids sending the same prompt twice.
+        """
+        return self._prompts_written
 
     async def discard_unanswered_prompt(self) -> bool:
         """Forward to the session handle: rewind KAS history to before the last prompt."""
