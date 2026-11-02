@@ -186,6 +186,20 @@
       "backend_stripped": "```\n- ```\n```",
       "frontend_stripped": "```\n- ```\n```",
       "exempt": true
+    },
+    {
+      "name": "option_items tail after an OPTIONS line: backend strips it, frontend leaves it (renders as nothing)",
+      "input": "Pick one\n[OPTIONS: Merge | Hold]\n<!-- option_items: 1=it_0000000a -->",
+      "backend_stripped": "Pick one\n[OPTIONS: Merge | Hold]",
+      "frontend_stripped": "Pick one\n[OPTIONS: Merge | Hold]\n<!-- option_items: 1=it_0000000a -->",
+      "exempt": false
+    },
+    {
+      "name": "option_items stacked after keep-visible: stripped both sides",
+      "input": "report\n<!-- keep-visible -->\n<!-- option_items: 2=it_0000000b -->",
+      "backend_stripped": "report",
+      "frontend_stripped": "report",
+      "exempt": true
     }
   ]
 }

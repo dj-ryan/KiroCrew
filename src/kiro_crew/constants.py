@@ -1058,10 +1058,11 @@ def relocate_glued_tail_marker(text: str) -> str:
 #
 # Agent control tags ride in HTML comments, which the dashboard's markdown
 # pipeline renders as nothing (rehype-raw emits comment nodes the react
-# renderer skips). Three families exist in ``src/``:
+# renderer skips). Four families exist in ``src/``:
 #   * ``<!-- keep-visible -->``       — collapse-all exemption
 #   * ``<!-- deliver:<route> -->``    — heartbeat routing
 #   * ``<!-- plan_task_id:<id> -->``  — task-planner Apply-to-Tasks anchor
+#   * ``<!-- option_items: 1=<item id> -->`` — option-to-work-item map
 #
 # ONE GRAMMAR, TAIL-ANCHORED + FENCE-GUARDED, case-insensitive, both
 # recognizers (this regex and ``website/src/app-sdk/protocol/
@@ -1086,9 +1087,7 @@ def relocate_glued_tail_marker(text: str) -> str:
 # quadratic). An unterminated ``<!--`` is NOT matched: swallowing to
 # end-of-text on a missing ``-->`` silently deletes visible prose. A tag
 # body over the bound is not a real control tag and stays visible.
-_CONTROL_TAG_BODY = (
-    r"<!--(?:\s{0,16}keep-visible\s{0,16}|\s{0,16}(?:deliver|plan_task_id):[^>\n]{0,256})-->"
-)
+_CONTROL_TAG_BODY = r"<!--(?:\s{0,16}keep-visible\s{0,16}|\s{0,16}(?:deliver|plan_task_id|option_items):[^>\n]{0,256})-->"
 _TRAILING_CONTROL_LINES_RE = re.compile(
     r"(?:(?:^|\n)[ \t]{0,3}" + _CONTROL_TAG_BODY + r"[ \t]{0,16})+\s{0,16}\Z",
     re.IGNORECASE,
@@ -1136,6 +1135,8 @@ _PARTIAL_CONTROL_LINE_RE = re.compile(
     + _prefix_closure("deliver:", r"[^>\n]{0,258}")
     + "|"
     + _prefix_closure("plan_task_id:", r"[^>\n]{0,258}")
+    + "|"
+    + _prefix_closure("option_items:", r"[^>\n]{0,258}")
     + r"))?)?)?)?\Z",
     re.IGNORECASE,
 )

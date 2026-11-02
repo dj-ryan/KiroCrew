@@ -36,7 +36,7 @@
 // families) without voiding the exemption; the whole trailing tag block
 // matches, so copy/search strip all of it and the exemption still fires.
 const KEEP_VISIBLE_MARKER_RE =
-  /(?:^|\n)[ \t]{0,3}<!--\s{0,16}keep-visible\s{0,16}-->[ \t]{0,16}(?:\n[ \t]{0,3}<!--\s{0,16}(?:deliver|plan_task_id):[^>\n]{0,256}-->[ \t]{0,16})*\s{0,16}$/gi
+  /(?:^|\n)[ \t]{0,3}<!--\s{0,16}keep-visible\s{0,16}-->[ \t]{0,16}(?:\n[ \t]{0,3}<!--\s{0,16}(?:deliver|plan_task_id|option_items):[^>\n]{0,256}-->[ \t]{0,16})*\s{0,16}$/gi
 
 // Fence-delimiter lines (CommonMark: 3+ backticks or tildes, ≤3 leading
 // spaces) for the open-fence parity guard.

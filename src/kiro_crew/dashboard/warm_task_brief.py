@@ -35,10 +35,12 @@ from typing import TYPE_CHECKING, Any, cast
 from kiro_crew import crew_mode
 from kiro_crew import members as members_mod
 from kiro_crew.config.loader import KiroCrewConfig
+from kiro_crew.constants import strip_control_comments
 from kiro_crew.dashboard import warm_task_brief_inputs as inputs
 from kiro_crew.dashboard.chat_utils import effective_session_key, slot_history_key
 from kiro_crew.dashboard.slot_preparing import preparing_message
 from kiro_crew.dashboard.slot_retention import _MAX_FOREGROUND_KEY
+from kiro_crew.dashboard.system_notices import is_system_notice
 from kiro_crew.dashboard.warm_task_brief_inputs import parse_epoch as _parse_epoch
 from kiro_crew.dashboard.warm_task_brief_inputs import row_epoch as _row_epoch
 from kiro_crew.history import TranscriptBusy, TranscriptWithheld, is_incognito_transcript
@@ -311,6 +313,8 @@ class TaskSnapshot:
     # What waits on the owner now: the "Waiting on you" list
     # (``member_waiting.waiting_items``), newest first.
     waiting: tuple[dict[str, Any], ...] = ()
+    # The ``[OPTIONS:]`` line the owner was left with, copied onto the brief.
+    pending_options: str = ""
 
     def away_anchor(self, seen_at: float | None = None) -> float | None:
         """When the owner was last known present: the latest of *seen_at*
@@ -799,6 +803,7 @@ def _snapshot_sync(
         progress=_goal_progress(conductor_record, items),
         turns=tuple(turns),
         previous_claim=_record_claim(rows),
+        pending_options=_pending_options(rows, items) or "",
         ledger_digest=inputs.ledger_digest(conductor_record, items_raw, session_state),
         previous_digest=_claim_digest(rows),
         last_claim_at=_claim_epoch(rows),
@@ -1636,6 +1641,69 @@ def _brief_text(brief: Brief, language: str) -> str:
     return "\n".join(lines)
 
 
+_OPTION_ITEMS_RE = re.compile(r"<!--\s{0,16}option_items:([^>\n]{0,256})-->", re.IGNORECASE)
+
+
+def _pending_options(rows: list[dict[str, Any]], items: tuple[dict[str, Any], ...]) -> str | None:
+    """The chip bar's pending choices, as one ``[OPTIONS:]`` line, or "".
+
+    ``None`` when no row in *rows* decides it (an empty or trimmed window).
+
+    The source is the newest row the chip bar could offer from: an assistant
+    reply or a note with a marker. A user, queued or Stop row means the choice
+    was answered, so none is copied. An option the source's hidden
+    ``<!-- option_items: 1=<item id> -->`` map ties to an accepted item drops.
+    """
+    from kiro_crew.dashboard.state import _parse_options as parse_options
+
+    for row in reversed(rows):
+        role, text = row.get("role"), str(row.get("content") or "")
+        raw = row.get("meta")
+        meta: dict[str, Any] = raw if isinstance(raw, dict) else {}
+        if role in ("user", "queued") or meta.get("kind") == "stop_event":
+            return ""
+        note = role == "inject" and (
+            "reconcile-note" in str(row.get("cls") or "") or bool(meta.get("noteSession"))
+        )
+        speech = role == "assistant" and not is_system_notice(role, meta)
+        if not (note or speech) or meta.get("kind") in _MESSAGE_KINDS:
+            continue
+        if speech and not text.strip("\u200b \n"):
+            continue
+        options = parse_options(text)
+        marker = text[text.rfind("[OPTION") :].split("\n", 1)[0]
+        if len(options) == 1 and "|" not in marker:
+            # The chip bar splits on commas when the marker has no pipe.
+            options = [o.strip() for o in options[0].split(",") if o.strip()]
+        if not options:
+            # A marker this parser cannot read (a single-select ``[OPTION:``)
+            # still ends the scan: copying nothing beats copying older choices.
+            if note and "[OPTION" not in text:
+                continue
+            return ""
+        done = {item["item_id"] for item in items if item.get("state") == "accepted"}
+        # Only the trailing control-tag block maps options; a quoted example
+        # elsewhere in the reply is prose.
+        tags = _OPTION_ITEMS_RE.findall(text[len(strip_control_comments(text)) :])
+        tied = dict(re.findall(r"\b(\d{1,2})=(it_[0-9a-f]{8})\b", tags[-1])) if tags else {}
+        kept = [o for n, o in enumerate(options, 1) if tied.get(str(n)) not in done]
+        # A trailing pipe keeps one comma-bearing label whole in the chip bar.
+        tail = " |" if len(kept) == 1 and "," in kept[0] else ""
+        return f"[OPTIONS: {' | '.join(kept)}{tail}]" if kept else ""
+    return None
+
+
+def _live_options(slot: "_ChatSlot", settled: TaskSnapshot) -> str:
+    """The choices to copy at post time, for every brief post.
+
+    The slot's in-memory window wins when it decides: a note appended after
+    the last flush is in memory before it is on disk.
+    """
+    rows = list(getattr(slot, "messages", None) or [])
+    in_memory = _pending_options(rows, settled.work_items)
+    return settled.pending_options if in_memory is None else in_memory
+
+
 def _post_message(
     state: "DashboardState",
     slot: "_ChatSlot",
@@ -1645,8 +1713,14 @@ def _post_message(
     fingerprint: str,
     brief: Brief | None = None,
     grounding_miss: str = "",
+    options: str = "",
 ) -> dict[str, Any]:
-    """Post one ordinary crewmate message; the normal flush loop persists it."""
+    """Post one ordinary crewmate message; the normal flush loop persists it.
+
+    *options* is the gateway-copied marker: the only live one in the row.
+    """
+    if options:
+        content = f"{content}\n\n{options}"
     from kiro_crew.dashboard.state import append_and_surface
 
     meta: dict[str, Any] = {"kind": kind, "fingerprint": fingerprint}
@@ -1790,7 +1864,14 @@ async def _run_warm_task_brief(
         # Nothing to catch up on: one fixed line, no model call. It carries no
         # card, so it claims no task status (a blocked task stays blocked).
         quiet = _QUIET_TEXT[language].format(at=inputs.clock(anchor))
-        _post_message(state, slot, quiet, kind=_RESULT_KIND, fingerprint=snapshot.fingerprint)
+        _post_message(
+            state,
+            slot,
+            quiet,
+            kind=_RESULT_KIND,
+            fingerprint=snapshot.fingerprint,
+            options=_live_options(slot, fresh),
+        )
         return
     # From here the thread shows the "preparing your catch-up" indicator
     # without marking a turn: the deferral below still reads ``slot.running``.
@@ -1804,6 +1885,7 @@ async def _run_warm_task_brief(
     # What the owner sees must still be true when it posts: an ask answered or
     # a ledger write during the model call makes the result stale. Regenerate
     # once from the new state; a second change posts nothing this visit.
+    options = ""
     for _attempt in range(WARM_TASK_BRIEF_ATTEMPTS):
         live = tuple(await inputs.read_live_prs(_live_refs(fresh)))
         asked_at = time.time()
@@ -1814,6 +1896,9 @@ async def _run_warm_task_brief(
         settled = await _settled(state, slot, snapshot, deadline, require_foreground=False)
         if settled is None:
             return
+        # The buttons come from the last re-read: a reply or note that landed
+        # during the model call changes what the chip bar would offer.
+        options = _live_options(slot, settled)
         if settled.waiting == fresh.waiting and settled.ledger_digest == fresh.ledger_digest:
             break
         fresh = settled
@@ -1828,6 +1913,7 @@ async def _run_warm_task_brief(
             _FAILURE_TEXT[language],
             kind=_FAILURE_KIND,
             fingerprint=snapshot.fingerprint,
+            options=options,
         )
         return
     # Section 3.9.6, after the PR filter above: a commit SHA or time the input
@@ -1857,4 +1943,5 @@ async def _run_warm_task_brief(
         fingerprint=snapshot.fingerprint,
         brief=brief,
         grounding_miss=miss,
+        options=options,
     )
