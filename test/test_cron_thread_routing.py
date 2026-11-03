@@ -352,7 +352,9 @@ class TestSubagentDoneCronRouting:
         ):
             await subagent_done(info)
 
-        gateway.sessions.reset.assert_awaited_once_with("cron:j1", skip_if_busy=True)
+        gateway.sessions.reset.assert_awaited_once_with(
+            "cron:j1", skip_if_busy=True, skip_if_injecting=True
+        )
 
     @pytest.mark.asyncio
     async def test_injection_failure_does_not_propagate(self) -> None:
