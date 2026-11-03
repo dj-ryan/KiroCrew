@@ -116,8 +116,8 @@ export function sttCanStream(cfg: SttConfig | undefined): boolean {
 }
 
 /**
- * A deliberate finish (`StopIntent` 'finish') waiting for its transcript to
- * settle before it sends, under `stt.submit_on_release`.
+ * A deliberate send waiting for its transcript to settle before it goes: a
+ * `StopIntent` 'send', or a 'finish' under `stt.submit_on_release`.
  *
  * Armed at the stop, consumed exactly once by the settle effect, and dropped by
  * everything that ends the dictation's claim on the composer: a new capture, a
@@ -849,8 +849,9 @@ export function useComposerVoice(host: ComposerVoiceHost) {
   const stopCapture = voice.stop
   /**
    * Stop capture. `intent` says whether the person chose to finish (see
-   * `StopIntent`); with `stt.submit_on_release` on, a 'finish' arms the send
-   * that the settle effect below fires once the transcript is complete.
+   * `StopIntent`); a 'send', or a 'finish' with `stt.submit_on_release` on,
+   * arms the send that the settle effect below fires once the transcript is
+   * complete.
    *
    * Armed only over a capture that is really running and that no send has
    * already ended. A semantic endpoint can send mid-hold, and the finger that
@@ -859,7 +860,8 @@ export function useComposerVoice(host: ComposerVoiceHost) {
   const stopVoice = useCallback((intent?: StopIntent) => {
     releaseSubmitRef.current = null
     const live = voiceRef.current
-    if (intent === 'finish' && submitOnReleaseRef.current && live.recording && !sttDisarmedRef.current) {
+    const sends = intent === 'send' || (intent === 'finish' && submitOnReleaseRef.current)
+    if (sends && live.recording && !sttDisarmedRef.current) {
       releaseSubmitRef.current = {
         session: sessionIdRef.current,
         capture: startGenRef.current,

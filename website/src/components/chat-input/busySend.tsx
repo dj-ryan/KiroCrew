@@ -184,7 +184,7 @@ export function useComposerSend({ slotId, busyMode, isRunning, stopState, canSte
     else onFollowUpSend?.(text, sourceKeyAtClick)
   }, [disabled, steerActive, steerAuto, onSteer, onFollowUpSend])
 
-  return { effectiveBusyMode, setBusySendMode, steerOnly, overLimitPending, fireComposer, stopWithTap, sendFollowUp }
+  return { effectiveBusyMode, setBusySendMode, steerOnly, steerActive, steerAuto, overLimitPending, fireComposer, stopWithTap, sendFollowUp }
 }
 
 /** The send slot while a turn runs or a stop is in progress. Stop escalates

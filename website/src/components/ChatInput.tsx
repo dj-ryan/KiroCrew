@@ -68,6 +68,7 @@ import { ComposerPickerMenus } from '../chat-core/composer/PickerMenus'
 import { usePickerSource } from './dashboardPickerSource'
 import { useDictationControls, useHoldToTalk } from './chat-input/voice'
 import { HoldToTalkBar, MicButton, VoiceCaptureStatus } from './chat-input/VoiceControls'
+import { COMPOSER_ROW_SPRING, ComposerSizer } from './chat-input/ComposerSizer'
 import { AgentChip, ContextUsageControl, ModelChip, SessionControlChips, useContextPopover, useShelfMeasure } from './chat-input/ContextShelf'
 import { useAutoCompactThreshold } from './chat-input/autoCompact'
 import { AttachMenu, usePlusMenu } from './chat-input/attach'
@@ -123,10 +124,6 @@ const VIDEO_ACCEPT = 'video/mp4,video/x-m4v,video/quicktime,video/webm'
 // gate. Extensions align the picker exactly with the verified server allowlist
 // instead of broadening the dialog to neighboring unsupported formats.
 const AUDIO_ACCEPT = '.mp3,.m4a,.wav,.ogg,.oga,.opus,.flac'
-// The box's height change between the one-row and two-row shapes and on a
-// wrapped or removed line (`inlineToolbarWhileFits`). Short and barely bouncy:
-// it fires mid-typing, so anything longer trails the caret.
-const COMPOSER_ROW_SPRING = { type: 'spring', stiffness: 520, damping: 38, mass: 0.8 } as const
 // Half the one-row box: the 44px text line plus its 1px border each side.
 const COMPOSER_ONE_ROW_RADIUS = 23
 // The one-row text line's padding, equal above and below so the line sits on
@@ -169,39 +166,6 @@ export type { ComposerBusyMode } from './chat-input/props'
 
 /** No Voice atom mounted: every dictation value at its idle default. */
 const NO_VOICE: Partial<ComposerVoiceInputProps> = {}
-
-/**
- * The box's height animator for `inlineToolbarWhileFits`. Enabled, it is a
- * bottom-aligned clip whose height follows `height` (the inner box's measured
- * natural height) and springs between the two shapes when `animate` is set;
- * the inner box keeps its natural height (`shrink-0`), so while the sizer is
- * still shorter it clips the TOP of the text column and the buttons at the
- * bottom never move. The clip is `overflow: clip`, never `hidden`: a `hidden`
- * box keeps a scroll position, and WebKit scrolls it to bring a caret in that
- * clipped top band into view, so the text jumps while the box opens.
- * Disabled -- every host that does not opt in -- it renders
- * its children bare, so the ordinary composer's tree is exactly what it was.
- */
-function ComposerSizer({ enabled, height, animate, className, children }: {
-  enabled: boolean
-  height: number | null
-  animate: boolean
-  className: string
-  children: React.ReactNode
-}) {
-  if (!enabled) return <>{children}</>
-  return (
-    <motion.div
-      data-testid="composer-sizer"
-      initial={false}
-      animate={{ height: height ?? 'auto' }}
-      transition={animate ? COMPOSER_ROW_SPRING : { duration: 0 }}
-      className={className}
-    >
-      {children}
-    </motion.div>
-  )
-}
 
 function ChatInput({
   aboveComposer,
@@ -568,7 +532,7 @@ function ChatInput({
     el.click()
     setPlusOpen(false)
   }
-  const { effectiveBusyMode, setBusySendMode, steerOnly, overLimitPending, fireComposer: fireAgentComposer, stopWithTap, sendFollowUp } = useComposerSend({
+  const { effectiveBusyMode, setBusySendMode, steerOnly, steerActive, steerAuto, overLimitPending, fireComposer: fireAgentComposer, stopWithTap, sendFollowUp } = useComposerSend({
     slotId, busyMode, isRunning, stopState, canSteer, onSteer, jevAutoAvailable, disabled, holdSend, voiceTranscribing, value, pasteBlocks, contextWindowTokens,
     pendingFilesCount: pendingFiles.length, pendingSessionsCount: pendingSessions.length, hasQuote: !!pendingQuote, onSend, onStop, onFollowUpSend,
   })
@@ -823,7 +787,7 @@ function ChatInput({
     voiceModePlaceholder,
   } = useHoldToTalk({
     onVoiceStart, onVoiceStop, onVoiceCancel, voiceCaptureActive, voiceRecording, voiceTranscribeActive, voiceTranscribing, voiceDownload, voiceSubmitOnRelease, voicePttBinding,
-    voiceBusyElsewhere, voiceBusyElsewhereSession, composerHasDraft, disabled, optimizing, placeholder, showDictation,
+    voiceBusyElsewhere, voiceBusyElsewhereSession, composerHasDraft, disabled, optimizing, placeholder, showDictation, voiceSendSteers: steerActive && !steerAuto && !terminal.active,
   })
   // The name in the status row is the way there: one click switches to the
   // chat that holds the mic, where the user can end the capture.
@@ -1430,7 +1394,7 @@ function ChatInput({
         </div>
 
         <VoiceCaptureStatus
-          voiceHoldMode={voiceHoldMode} touchPtt={touchPtt} draftZone={voiceSubmitOnRelease} showDictation={showDictation} value={value} voicePartial={voicePartial}
+          voiceHoldMode={voiceHoldMode} touchPtt={touchPtt} draftZone={voiceSubmitOnRelease} sendSteers={steerActive && !steerAuto && !terminal.active} showDictation={showDictation} value={value} voicePartial={voicePartial}
           voiceDeviceLabel={voiceDeviceLabel} voiceDeviceId={voiceDeviceId} onSelectVoiceDevice={onSelectVoiceDevice} voiceDeviceSwitchIsLive={voiceDeviceSwitchIsLive}
           voiceStreaming={voiceStreaming} voiceDownload={voiceDownload} voiceRecording={voiceRecording} voiceLevel={voiceLevel} voiceError={voiceError} voiceKeptRecording={voiceKeptRecording}
           onClearVoiceError={onClearVoiceError} voiceDrainCancellable={voiceDrainCancellable} cancelVoiceDrain={cancelVoiceDrain} onVoiceToggle={onVoiceToggle}
