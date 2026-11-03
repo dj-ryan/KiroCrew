@@ -1787,6 +1787,60 @@ describe('WorkflowLibraryTab', () => {
       expect(screen.queryByRole('status')).not.toBeInTheDocument()
     })
 
+    it('settles as removed when the response is lost after the removal committed', async () => {
+      mockApi.workflowDefinitions.mockResolvedValue({
+        definitions: [DEFINITION, OTHER],
+      })
+      mockApi.removeWorkflowDefinition.mockImplementation(async () => {
+        // The tombstone is written, then the response body read is cut.
+        mockApi.workflowDefinitions.mockResolvedValue({ definitions: [OTHER] })
+        throw new TypeError('network error')
+      })
+      renderTab()
+      await editorShown()
+
+      fireEvent.click(screen.getByRole('button', { name: removeLabel() }))
+      const dialog = await screen.findByRole('dialog')
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: removeLabel() }),
+      )
+
+      await waitFor(() =>
+        expect(
+          screen.queryByText('/workflow debug-project'),
+        ).not.toBeInTheDocument(),
+      )
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('keeps the row and shows the failure when a lost response leaves the record in the library', async () => {
+      mockApi.workflowDefinitions.mockResolvedValue({
+        definitions: [DEFINITION, OTHER],
+      })
+      mockApi.removeWorkflowDefinition.mockRejectedValue(
+        new TypeError('network error'),
+      )
+      renderTab()
+      await editorShown()
+      const readsBefore = mockApi.workflowDefinitions.mock.calls.length
+
+      fireEvent.click(screen.getByRole('button', { name: removeLabel() }))
+      const dialog = await screen.findByRole('dialog')
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: removeLabel() }),
+      )
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        i18nT('pages.overview.workflowLibrary.remove_failed', {
+          name: 'Debug Project',
+        }),
+      )
+      expect(mockApi.workflowDefinitions.mock.calls.length).toBeGreaterThan(
+        readsBefore,
+      )
+      expect(screen.getAllByText('/workflow debug-project')).toHaveLength(2)
+    })
+
     it('retries by the ref the fresh read gives the workflow, not the one that 404ed', async () => {
       // A removed workflow holds this one's id, so Remove goes by its slug,
       // and another tab renames that slug before the removal arrives.
