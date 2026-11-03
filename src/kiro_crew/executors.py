@@ -283,11 +283,10 @@ _CRON_GATE_QUEUE_SHARE = 0.25
 # and every other ``to_thread`` caller, so the gate gets its own pool and its
 # calls queue only behind other gate calls.
 #
-# Four workers.  The resolver has :data:`_PATH_RESOLVE_WORKERS_DEFAULT` children,
-# and a gate thread beyond that count only waits inside the resolver, so a much
-# larger pool buys nothing during a stall; four leaves two workers serving
-# non-path verdicts and the degraded-mount fast refusals while both children are
-# wedged.  A healthy gate call costs milliseconds, so four is a ceiling on how
+# Four workers.  The resolver children are shared with every other gate caller
+# (memory reads, prompt reads, the loop), so a much larger pool here buys nothing
+# during a stall: once a prefix is charged, its later calls are refused from the
+# cooldown without a child.  A healthy gate call costs milliseconds, so four is a ceiling on how
 # many calls can be stalled at once, not on throughput.  It also stays below the
 # default executor's smallest size (``min(32, cpu_count + 4)`` is at least 5), so
 # a full gate pool is never larger than the pool it is kept off.
@@ -298,9 +297,12 @@ _MAX_TOOL_GATE_WORKERS = 4
 # its own verdict, which the path tier already bounds.  Sized from the 100-agent
 # load run against two numbers: healthy queue waits
 # are milliseconds, so the bound never binds outside starvation, and a worker on
-# a dead mount holds at most one resolve budget plus grace (5 s) per call and
-# about 12 s per 25 s window (the per-thread allowance in ``security.paths``),
-# so a call queued behind four such workers is still served inside the bound.
+# dead mounts spends at most 12 s of candidate resolver waits on one call (the
+# judgment budget ``HookManager.judge`` opens), plus one root-key and one target
+# rebuild wait (5 s and 12 s) while the anchor cache is cold.  A stalled anchor
+# charges the home prefix, so later calls are refused from its cooldown with no
+# wait; only in the first seconds of a wedge on the home mount can a call queued
+# behind four such workers miss the bound, and it is then refused unjudged.
 _TOOL_GATE_QUEUE_WAIT_SECS = 15.0
 
 # Pillow work for the gateway's tool-result image budget is CPU-bound (a
@@ -347,16 +349,19 @@ _MAX_STT_WORKERS = 2
 # costs one respawn (~11ms), never a pinned worker.  Measurements and the
 # reasoning are in ``subprocess_pool/executor.py``.
 #
-# The knob sizes the number of children.  One sustains ~45k resolutions/s, so the
-# second buys wedge isolation rather than throughput: while one child is stuck on
-# a dead mount (until the deadline reclaims it), the other keeps serving every
-# healthy prefix.  The DEFAULT stays 2 and the floor is 2 for that reason; the
-# resolver is the caller that cannot accept a single child.  Read once at import,
+# The knob sizes the number of children.  One sustains ~45k resolutions/s idle,
+# but a caller holds its child for the whole round trip INCLUDING its own wait for
+# the GIL to read the answer, so under CPU load the count of children is how many
+# GIL-starved callers fit before the next one is refused for want of a free child.
+# Measured with 32 busy threads and 16 callers: 2 children refused 47 of 80 checks
+# that way and 16 refused 3.  The DEFAULT is 8 for that reason.  The floor is 2
+# for wedge isolation: while one child is stuck on a dead mount (until the
+# deadline reclaims it), another keeps serving every healthy prefix.  Read once at import,
 # because the pool is a module-level singleton; an unparseable or out-of-range
 # value keeps the default rather than failing the import, since a gateway that
 # will not start is a worse outcome than one resolving with the shipped size.
 _PATH_RESOLVE_WORKERS_ENV = "KIROCREW_PATH_RESOLVE_WORKERS"
-_PATH_RESOLVE_WORKERS_DEFAULT = 2
+_PATH_RESOLVE_WORKERS_DEFAULT = 8
 _PATH_RESOLVE_WORKERS_MIN = 2
 _PATH_RESOLVE_WORKERS_MAX = 64
 
@@ -364,9 +369,8 @@ _PATH_RESOLVE_WORKERS_MAX = 64
 def _path_resolve_worker_count() -> int:
     """The resolver pool size: :data:`_PATH_RESOLVE_WORKERS_DEFAULT` unless overridden.
 
-    Fail-soft TO THE DEFAULT, which is the conservative direction here: the default
-    is the LOWER ceiling, so a bad value can only ever leave the shipped behaviour
-    in place, never widen it.
+    Fail-soft TO THE DEFAULT: a bad value leaves the shipped size in place rather
+    than failing the import.
     """
     raw = os.environ.get(_PATH_RESOLVE_WORKERS_ENV, "").strip()
     if not raw:

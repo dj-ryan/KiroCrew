@@ -655,7 +655,14 @@ def _url_payload_command(n: int) -> str:
 #: use in ``_DenyWaiver``: it keeps every self-protection floor, the unverifiable
 #: push key and every self-protection or credential-exfil rule out of the override
 #: entirely, so the change only narrows what can be waived.
-_PACKAGE_LINE_BUDGET = 33_959
+#: Raised by 112 more, to 34,071, in ``paths_resolver``: the test that confines the
+#: cumulative wait allowance to a thread running an event loop, the arm that
+#: refuses without spending a load-arm probe when the child was sampled idle on its
+#: request pipe, and ``bounded_judgment``, the one shared resolver budget an
+#: off-loop judgment such as a tool-gate call gets, each with the note on why it
+#: admits nothing; and the six lines the ``paths`` facade's manifest lists for
+#: them. No check was relaxed.
+_PACKAGE_LINE_BUDGET = 34_071
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

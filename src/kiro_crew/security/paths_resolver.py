@@ -17,6 +17,8 @@ gates read it, and this module imports no other part of the path floor.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import platform
@@ -38,7 +40,7 @@ from kiro_crew.subprocess_pool import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 logger = logging.getLogger("kiro_crew.security.paths")
 
@@ -109,7 +111,16 @@ _PATH_RESOLVE_REBUILD_TIMEOUT_SECS = 8.0
 # leaving 13s of the 25s watchdog for heartbeat age and other tool-call work.
 # Retain that spend until 25s after the LAST wait, not a fixed window boundary:
 # otherwise two adjacent windows can spend twice the cap inside one watchdog gap.
-# Background callers have their own allowance, never the event-loop thread's.
+#
+# Only a thread that is RUNNING an event loop pays it (:func:`_running_event_loop`):
+# the allowance exists for the loop's watchdog.  An off-loop caller (a memory read
+# pool, a tool-gate worker) is bounded by its own caller's wait, and under GIL
+# contention its waits are mostly the thread's own wait for the GIL, so charging
+# them refused plain files with no filesystem evidence.  A wedged mount still
+# refuses such a caller: its first charged miss opens the prefix cooldown, and the
+# cooldown applies to every thread.  An off-loop tool-gate judgment takes the same
+# 12 s as ONE budget for its candidate paths instead (:func:`bounded_judgment`), so
+# a call naming many distinct slow mounts cannot hold its worker for a budget per path.
 _PATH_RESOLVE_WAIT_CAP_SECS = 12.0
 
 
@@ -183,6 +194,16 @@ _FS_BLOCKING_SYSCALLS: frozenset[int] = _FS_BLOCKING_SYSCALLS_BY_ARCH.get(
 )
 
 
+# ``read``.  The resolver child calls it only on its request pipe (``realpath`` uses
+# the stat family and ``readlink``), so a child sampled in it was idle: it had not
+# yet picked the request up, or it had answered and the caller read the pipe too
+# late.  An unmapped architecture has no entry, so its samples take the paths above.
+_IDLE_ON_REQUEST_PIPE_BY_ARCH: dict[str, int] = {"x86_64": 0, "aarch64": 63}
+
+
+_IDLE_ON_REQUEST_PIPE: int | None = _IDLE_ON_REQUEST_PIPE_BY_ARCH.get(platform.machine())
+
+
 # stall prefix -> (monotonic deadline until which paths under it are refused,
 # consecutive stalls recorded under it -- drives the exponential backoff)
 _path_resolve_degraded: dict[str, tuple[float, int]] = {}
@@ -193,6 +214,11 @@ _path_resolve_load_probes: dict[str, tuple[float, int]] = {}
 
 # calling thread id -> (quiet-window end, accumulated seconds in result waits)
 _path_resolve_thread_waits: dict[int, tuple[float, float]] = {}
+
+
+# ``deadline``: the ``_path_resolve_clock`` instant the judgment open on this thread
+# must finish its resolver waits by (:func:`bounded_judgment`); absent outside one.
+_judgment_budget = threading.local()
 
 
 _path_resolve_lock = threading.Lock()
@@ -234,6 +260,39 @@ _child_fault_streak = 0
 
 
 _child_fault_warned = False
+
+
+def _running_event_loop() -> bool:
+    """True when the calling thread is running an event loop, the only payer of the allowance."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def bounded_judgment(seconds: float = _PATH_RESOLVE_WAIT_CAP_SECS) -> Iterator[None]:
+    """Give every CANDIDATE resolution an off-loop thread makes here ONE shared budget.
+
+    For a caller that judges agent-supplied paths off the event loop, such as a
+    tool-gate worker: a call can name many paths on distinct slow mounts, and
+    without a shared budget each would be granted its own budget plus grace.  Once
+    the budget is spent, later paths are refused without a probe and charge no
+    prefix, like the loop's allowance; a wait cut short by it never charges one
+    either.  The anchor resolutions (the root key and the target rebuild) are not
+    clamped: they are cached and shared by every caller, and a rebuild's budget
+    plus grace is the whole 12 s, so a clamped one could never charge a wedged
+    home and every later call would re-probe it.  On the event loop the loop's own
+    allowance applies instead.  Nested blocks keep the earlier deadline.
+    """
+    previous = getattr(_judgment_budget, "deadline", None)
+    deadline = _path_resolve_clock() + seconds
+    _judgment_budget.deadline = deadline if previous is None else min(previous, deadline)
+    try:
+        yield
+    finally:
+        _judgment_budget.deadline = previous
 
 
 def _outside_bounded_call() -> bool:
@@ -561,6 +620,16 @@ def _child_blocked_in_filesystem(sampled: bytes | None) -> bool:
     return blocked
 
 
+def _child_idle_on_request_pipe(sampled: bytes | None) -> bool:
+    """True when the child's sampled syscall was ``read`` on its request pipe."""
+    if sampled is None or _IDLE_ON_REQUEST_PIPE is None:
+        return False
+    try:
+        return int(sampled) == _IDLE_ON_REQUEST_PIPE
+    except ValueError:
+        return False
+
+
 def _load_arm_budget_spent(prefix: str) -> bool:
     """Record a load-arm probe under *prefix*; True once the window's allowance is gone.
 
@@ -708,7 +777,11 @@ def _resolve_on_calling_thread(
 
 
 def _run_resolution_bounded(
-    expanded: str, worker: Callable[[str], _ResolvedT], *, budget: float | None = None
+    expanded: str,
+    worker: Callable[[str], _ResolvedT],
+    *,
+    budget: float | None = None,
+    candidate: bool = False,
 ) -> _ResolvedT | None:
     """Run *worker(expanded)*, its ``realpath`` work in the resolver child, within the budget.
 
@@ -759,6 +832,9 @@ def _run_resolution_bounded(
     still be canonicalised or a canonical-spelling request would miss the
     governance file (found in review); the bound makes that probe safe.
 
+    *candidate* marks an agent-supplied path, the only kind an open
+    :func:`bounded_judgment` clamps.
+
     *budget* sizes the wait to the work the caller submits: the anchor REBUILD is
     one request carrying a few hundred paths and passes
     ``_PATH_RESOLVE_REBUILD_TIMEOUT_SECS``, while a candidate resolution keeps the
@@ -787,21 +863,38 @@ def _run_resolution_bounded(
         _extend_cooldown(prefix)
         raise PathResolutionStalled(expanded, prefix)
     caller_tid = threading.get_ident()
-    with _path_resolve_lock:
-        if len(_path_resolve_thread_waits) > 64:
-            # Clearing live entries would let thread churn refund the loop's spend.
-            expired = [tid for tid, (end, _) in _path_resolve_thread_waits.items() if now >= end]
-            for expired_tid in expired:
-                del _path_resolve_thread_waits[expired_tid]
-        window_end, seconds_spent = _path_resolve_thread_waits.get(caller_tid, (0.0, 0.0))
-        if now >= window_end:
-            seconds_spent = 0.0
-    remaining = _PATH_RESOLVE_WAIT_CAP_SECS - seconds_spent
+    on_loop = _running_event_loop()
+    seconds_spent = 0.0
+    if on_loop:
+        with _path_resolve_lock:
+            if len(_path_resolve_thread_waits) > 64:
+                # Clearing live entries would let thread churn refund the loop's spend.
+                expired = [
+                    tid for tid, (end, _) in _path_resolve_thread_waits.items() if now >= end
+                ]
+                for expired_tid in expired:
+                    del _path_resolve_thread_waits[expired_tid]
+            window_end, seconds_spent = _path_resolve_thread_waits.get(caller_tid, (0.0, 0.0))
+            if now >= window_end:
+                seconds_spent = 0.0
+    judgment_deadline = (
+        getattr(_judgment_budget, "deadline", None) if candidate and not on_loop else None
+    )
+    if on_loop:
+        remaining = _PATH_RESOLVE_WAIT_CAP_SECS - seconds_spent
+    elif judgment_deadline is not None:
+        remaining = judgment_deadline - now
+    else:
+        remaining = float("inf")
     if remaining <= 0:
         # No work ran, so this refusal says nothing about the prefix's mount.
         logger.debug(
-            "sensitive-path symlink resolution refused without probing: calling thread's "
-            "cumulative wait allowance exhausted; prefix not charged"
+            "sensitive-path symlink resolution refused without probing: %s; prefix not " "charged",
+            (
+                "calling thread's cumulative wait allowance exhausted"
+                if on_loop
+                else "the judgment's shared resolver budget is spent"
+            ),
         )
         raise PathResolutionStalled(expanded, prefix)
     # Budget plus grace, as ONE deadline (see the note above _PATH_RESOLVE_GRACE_FACTOR).
@@ -820,22 +913,35 @@ def _run_resolution_bounded(
                 "saturated and the resolution never started; prefix not charged"
             )
             raise PathResolutionStalled(expanded, prefix) from None
-        if not _child_blocked_in_filesystem(sampled) and not _load_arm_budget_spent(prefix):
-            # The child RAN but was not in the filesystem when the budget ran out: the
-            # same conclusion as the arm above, reached one step later.  Refuse THIS
-            # resolution instead of opening a cooldown across every path under the
-            # prefix.
-            logger.debug("sensitive-path resolution timed out under load; prefix not charged")
+        if _child_idle_on_request_pipe(sampled):
+            # The child was waiting for work, not on the filesystem, so the budget
+            # went on the calling thread's own scheduling.  Refuse this call, and
+            # spend none of the load arm's probes: those bound repeated waits on a
+            # child that IS working, and an idle sample is not one.  The event loop
+            # is still bounded by its allowance, and an off-loop thread by its caller.
+            logger.debug(
+                "sensitive-path resolution timed out with the resolver child idle on its "
+                "request pipe; prefix not charged"
+            )
             raise PathResolutionStalled(expanded, prefix) from None
         if granted < entitled:
-            # The deadline was clamped by the calling thread's allowance, not by
+            # The deadline was clamped by the calling thread's allowance or its
+            # judgment's budget, not by
             # anything the filesystem did -- and on a host where the syscall probe
             # cannot discriminate (every Windows host, Apple silicon) the grace is
             # the ONLY signal, so a truncated one answers nothing.  Refuse this call.
             logger.debug(
                 "sensitive-path resolution timed out with its budget or grace clamped "
-                "by the calling thread's cumulative wait allowance; prefix not charged"
+                "by the calling thread's wait allowance or judgment budget; prefix not "
+                "charged"
             )
+            raise PathResolutionStalled(expanded, prefix) from None
+        if not _child_blocked_in_filesystem(sampled) and not _load_arm_budget_spent(prefix):
+            # The child RAN but was not in the filesystem when the budget ran out: the
+            # same conclusion as the saturated-pool arm, reached one step later.  Refuse THIS
+            # resolution instead of opening a cooldown across every path under the
+            # prefix.
+            logger.debug("sensitive-path resolution timed out under load; prefix not charged")
             raise PathResolutionStalled(expanded, prefix) from None
         logger.debug("sensitive-path resolution timed out blocked in the filesystem")
         _mark_stalled(prefix, budget)
@@ -853,7 +959,7 @@ def _run_resolution_bounded(
     finally:
         wait_end = _path_resolve_clock()
         elapsed = max(0.0, wait_end - wait_start)
-        if elapsed >= _PATH_RESOLVE_WAIT_FLOOR_SECS:
+        if on_loop and elapsed >= _PATH_RESOLVE_WAIT_FLOOR_SECS:
             with _path_resolve_lock:
                 _path_resolve_thread_waits[caller_tid] = (
                     wait_end + _PATH_RESOLVE_WAIT_WINDOW_SECS,
@@ -880,7 +986,7 @@ def _resolved_forms_bounded(expanded: str) -> set[str]:
     """
     if _ON_WINDOWS and _is_unc_path(expanded):
         return set()
-    forms = _run_resolution_bounded(expanded, _resolved_spellings)
+    forms = _run_resolution_bounded(expanded, _resolved_spellings, candidate=True)
     return set() if forms is None else forms
 
 
