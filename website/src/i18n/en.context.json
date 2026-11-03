@@ -1138,6 +1138,15 @@
     "components.bottomTerminalPanel.find": "Terminal overflow-menu item: open the find bar to search the active terminal's scrollback; the VERB 'find', as in find-in-page.",
     "components.approvalCard.title_wants_to_run": "Chat approval card heading, after a package icon. <title/> is the command or tool the agent asks to run, shown in bold and kept verbatim; the sentence says it is waiting for approval.",
     "components.codeBlock.code_label": "Generic name for a code block whose language is unknown: the small header label and the screen-reader name of the block. A noun, lower case like a language tag.",
-    "components.codeBlock.code_region": "Screen-reader name of a code block. {{lang}} is the language tag as written, such as python or tsx, kept verbatim."
+    "components.codeBlock.code_region": "Screen-reader name of a code block. {{lang}} is the language tag as written, such as python or tsx, kept verbatim.",
+    "pages.settings.appUpdates.title": "Heading of the Settings > About group that controls whether installed apps (add-ons from the App Store) update themselves.",
+    "pages.settings.appUpdates.mode_off": "Value of 'Update apps automatically': only a notification, nothing is installed.",
+    "pages.settings.appUpdates.mode_ask": "Value of 'Update apps automatically': a notification with an Update button the user presses.",
+    "pages.settings.appUpdates.mode_on": "Value of 'Update apps automatically': new versions install without asking. An adjective, not a verb.",
+    "pages.settings.appUpdates.interval_hours": "Option in the app update check interval picker; {{hours}} is a number of hours, 'h' is the hour unit abbreviation.",
+    "pages.settings.appUpdates.interval_days": "Option in the app update check interval picker; {{days}} is a number of days, 'd' is the day unit abbreviation.",
+    "pages.appDetailPage.auto_update_follow": "Option on one app's page meaning 'use the global app updates setting'; {{mode}} is that setting's current value (Off, Ask or Automatic), already translated.",
+    "pages.appDetailPage.auto_update_always": "Option on one app's page: install every new version of this app automatically.",
+    "pages.appDetailPage.auto_update_never": "Option on one app's page: never update this app automatically, keep the installed version."
   }
 }
