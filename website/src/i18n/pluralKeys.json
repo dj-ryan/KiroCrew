@@ -457,5 +457,7 @@
   "apps.codeReviewSage.components.runDetail.more_count",
   "apps.codeReviewSage.components.runProgress.reviewed_of",
   "apps.codeReviewSage.components.runProgress.failed_count",
-  "apps.codeReviewSage.components.runProgress.cancelled_count"
+  "apps.codeReviewSage.components.runProgress.cancelled_count",
+  "components.pastedChip.collapse_pasted_lines",
+  "components.pastedChip.expand_pasted_lines"
 ]
