@@ -1313,6 +1313,54 @@ AUTO_APPROVABLE_CAPABILITIES: tuple[str, ...] = tuple(
     sorted(set(CAPABILITY_BY_TOOL.values()) | {_MCP_CAPABILITY})
 )
 
+#: Prefix of a :func:`hook_gated_capabilities` entry that names the MCP tools ONE
+#: hook matcher covers, as KAS's ``<server>/<tool>`` resource (``mcp:srv/tool``),
+#: rather than the whole ``mcp`` capability.
+HOOK_GATED_MCP_PREFIX = "mcp:"
+
+#: Prefix of an :func:`auto_approved_capabilities` entry naming an MCP resource
+#: pattern a scoped ``ask`` or ``deny`` holds back from the ``mcp`` grant
+#: (``mcp-held:srv/tool``).
+HELD_MCP_PREFIX = "mcp-held:"
+
+
+def _hook_mcp_pattern(matcher: str) -> str | None:
+    """The KAS resource pattern an MCP-form hook matcher names, or ``None``.
+
+    ``@server/tool`` and ``@server`` read as :func:`_mcp_pattern` reads them for an
+    allow (one literal server, a tool part with ``*``/``?`` at most), so the ``ask``
+    names exactly the resource the matching ``allow`` names. ``mcp__server__tool``
+    is read only when it splits one way: a literal with exactly one ``__`` after
+    the prefix. Anything else answers ``None`` and keeps covering every MCP tool.
+    """
+    if matcher.startswith(_MCP_PREFIX):
+        pattern = _mcp_pattern(matcher)
+        if pattern is None:
+            return None
+        server, _, tool = pattern.partition("/")
+        return pattern if server and tool else None
+    if matcher.lower().startswith(_MCP_TITLE_PREFIX):
+        rest = matcher[len(_MCP_TITLE_PREFIX) :]
+        if _GLOB_METACHARACTERS.intersection(rest):
+            return None
+        parts = rest.split("__")
+        if len(parts) != 2 or not all(parts):
+            return None
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+def _case_blind_pattern(pattern: str) -> str:
+    """*pattern* with each cased letter replaced by ``?``.
+
+    The hook store compares a matcher with a tool name case-insensitively, while
+    the real tool name's case is not known when the policy is built. ``?`` (one
+    character) is syntax kiro-cli and KAS read alike, so this pattern matches every
+    casing of *pattern* whether or not KAS compares case. It can also match another
+    tool of the same shape; that tool then prompts too, which is the safe side.
+    """
+    return "".join("?" if ch.lower() != ch.upper() else ch for ch in pattern)
+
 
 def hook_gated_capabilities(matchers: Iterable[str]) -> set[str]:
     """The auto-approvable capabilities a PreToolUse hook matcher could cover.
@@ -1329,7 +1377,11 @@ def hook_gated_capabilities(matchers: Iterable[str]) -> set[str]:
       read in every spelling :data:`KAS_TOOL_IDS_BY_KIRO_TOOL` and
       :data:`KIRO_TOOL_ALIASES` give it, so ``remote_web_search`` covers what
       ``web_search`` covers and ``run_command`` what ``execute_bash`` covers.
-    * A literal MCP tool name (``@server/tool``, ``mcp__server__tool``) covers MCP.
+    * An MCP-form matcher that names its server (``@server/tool``, ``@server``,
+      ``@server/get_*``, ``mcp__server__tool``) covers those tools only, as a
+      :data:`HOOK_GATED_MCP_PREFIX` entry: a hook on one MCP tool must not take
+      auto-approval from every other one. One that does not split that way
+      covers all of MCP.
     * Any other literal covers everything: it names no tool this table knows, so
       it may be a harness's own name for a built-in one.
     * A glob covers each built-in capability it matches by tool or capability
@@ -1346,6 +1398,10 @@ def hook_gated_capabilities(matchers: Iterable[str]) -> set[str]:
         matcher = raw.strip() if isinstance(raw, str) else ""
         if not matcher or matcher == "*":
             return set(AUTO_APPROVABLE_CAPABILITIES)
+        mcp_pattern = _hook_mcp_pattern(matcher)
+        if mcp_pattern is not None:
+            covered.add(HOOK_GATED_MCP_PREFIX + mcp_pattern)
+            continue
         if not _GLOB_METACHARACTERS.intersection(matcher):
             name = matcher.lower()
             capabilities = _capabilities_named(name)
@@ -1362,7 +1418,30 @@ def hook_gated_capabilities(matchers: Iterable[str]) -> set[str]:
         for name in matched:
             covered.update(_capabilities_named(name))
         covered.add(_MCP_CAPABILITY)
+    if _MCP_CAPABILITY in covered:
+        # Every MCP tool is covered already; the per-tool entries add nothing.
+        covered = {c for c in covered if not c.startswith(HOOK_GATED_MCP_PREFIX)}
     return covered
+
+
+def hook_gated_auto_approved(covered: Iterable[str], approved: Iterable[str]) -> set[str]:
+    """The entries of *covered* (:func:`hook_gated_capabilities`) that *approved*
+    (:func:`auto_approved_capabilities`) still auto-approves.
+
+    A capability is still approved when *approved* carries it. A
+    :data:`HOOK_GATED_MCP_PREFIX` entry is when *approved* carries ``mcp`` and no
+    :data:`HELD_MCP_PREFIX` entry for the same pattern.
+    """
+    granted = set(approved)
+    out: set[str] = set()
+    for entry in covered:
+        if entry.startswith(HOOK_GATED_MCP_PREFIX):
+            held = HELD_MCP_PREFIX + entry[len(HOOK_GATED_MCP_PREFIX) :]
+            if _MCP_CAPABILITY in granted and held not in granted:
+                out.add(entry)
+        elif entry in granted:
+            out.add(entry)
+    return out
 
 
 #: Every tool or capability name this module spells: a matcher naming one of
@@ -1406,25 +1485,39 @@ def withhold_hook_gated_auto_approval(
     back as a permission request, where the hook runs and Crew's own approval
     decides as it does for any other request. A ``deny`` still outranks it.
 
+    A hook that names MCP tools by server (``@srv/get_creds``) gets an ``ask``
+    scoped to those resources instead. The same precedence holds inside the
+    scope, so those calls still come back as permission requests, while every
+    other MCP tool keeps the auto-approval its ``allow`` gave it.
+
     ``None`` stays ``None``: with no policy every request already asks.
 
-    Each withheld capability is reported through ``audit_decision``, the same
-    permission trail the ceiling's withholds use.
+    Each withheld capability or MCP pattern is reported through
+    ``audit_decision``, the same permission trail the ceiling's withholds use.
     """
     if not policy:
         return policy
     covered = hook_gated_capabilities(pre_tool_matchers)
     if not covered:
         return policy
+    capabilities = sorted(c for c in covered if not c.startswith(HOOK_GATED_MCP_PREFIX))
+    hooked = sorted(
+        c[len(HOOK_GATED_MCP_PREFIX) :] for c in covered if c.startswith(HOOK_GATED_MCP_PREFIX)
+    )
+    # The hook matches a tool name in any case, so the ask must too: the matcher's
+    # own spelling, plus one that matches every casing of it.
+    mcp_patterns = sorted({*hooked, *map(_case_blind_pattern, hooked)})
+    refs = [*capabilities, *(f"{_MCP_PREFIX}{p}" for p in hooked)]
     logger.info(
         "agent %r: not auto-approving %s on this backend -- a PreToolUse hook covers "
         "it, and an auto-approved call raises no permission request for it to run on",
         agent_id,
-        ", ".join(sorted(covered)),
+        ", ".join(refs),
     )
-    for capability in sorted(covered):
-        audit_decision(capability, "withheld", "a PreToolUse hook covers it")
-    asks = [{"capability": capability, "effect": "ask"} for capability in sorted(covered)]
+    for ref in refs:
+        audit_decision(ref, "withheld", "a PreToolUse hook covers it")
+    asks = [{"capability": capability, "effect": "ask"} for capability in capabilities]
+    asks.extend(_chunked_rules(_MCP_CAPABILITY, "ask", mcp_patterns))
     return {"rules": [*policy["rules"], *asks]}
 
 
@@ -1437,23 +1530,31 @@ def auto_approved_capabilities(policy: Any) -> frozenset[str]:
     leaves the rest of the capability approved, so it cancels nothing here: the
     answer errs toward "still auto-approved", which is the side that makes the
     caller re-project.
+
+    While ``mcp`` is approved, each pattern a scoped ``mcp`` ``ask`` or ``deny``
+    names is also listed, as a :data:`HELD_MCP_PREFIX` entry, so
+    :func:`hook_gated_auto_approved` can tell a per-tool withhold already in
+    place from one still missing.
     """
     rules = policy.get("rules") if isinstance(policy, dict) else None
     allowed: set[str] = set()
     cancelled: set[str] = set()
+    held: set[str] = set()
     for rule in rules if isinstance(rules, list) else ():
         if not isinstance(rule, dict) or not isinstance(rule.get("capability"), str):
             continue
         capabilities = META_CAPABILITY_EXPANSION.get(rule["capability"], (rule["capability"],))
         if rule.get("effect") == "allow":
             allowed.update(capabilities)
-        elif (
-            rule.get("effect") in ("ask", "deny")
-            and not rule.get("match")
-            and not rule.get("exclude")
-        ):
-            cancelled.update(capabilities)
-    return frozenset(allowed - cancelled)
+        elif rule.get("effect") in ("ask", "deny") and not rule.get("exclude"):
+            if not rule.get("match"):
+                cancelled.update(capabilities)
+            elif rule["capability"] == _MCP_CAPABILITY:
+                held.update(_patterns(rule["match"]))
+    approved = allowed - cancelled
+    if _MCP_CAPABILITY in approved:
+        approved.update(HELD_MCP_PREFIX + pattern for pattern in held)
+    return frozenset(approved)
 
 
 # --- kiro-cli ``toolsSettings`` -> KAS ``permissions`` -------------------------

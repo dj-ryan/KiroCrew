@@ -15,6 +15,7 @@ subagent / task-runner turns.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 from contextlib import nullcontext
 from pathlib import Path
@@ -98,8 +99,12 @@ def _rules(policy) -> list[tuple[str, str]]:
         (("WEB_FETCH",), {"web_fetch"}),
         (("execute_bash",), set()),
         (("fs_write", "grep"), set()),
-        (("mcp__github__create_issue",), {"mcp"}),
-        (("@github/create_issue",), {"mcp"}),
+        (("mcp__github__create_issue",), {"mcp:github/create_issue"}),
+        (("@github/create_issue",), {"mcp:github/create_issue"}),
+        (("@github",), {"mcp:github/*"}),
+        (("@github/get_*",), {"mcp:github/get_*"}),
+        (("mcp__a__b__c",), {"mcp"}),
+        (("@github/create_issue", "web_*"), {"web_fetch", "web_search", "mcp"}),
         (("WebFetch",), _ALL),
         (("web_*",), {"web_fetch", "web_search", "mcp"}),
         (("execute_*",), {"mcp"}),
@@ -157,6 +162,65 @@ def test_no_hook_or_no_policy_changes_nothing():
     assert kas_permissions.withhold_hook_gated_auto_approval(policy, ()) is policy
     assert kas_permissions.withhold_hook_gated_auto_approval(policy, ("execute_bash",)) is policy
     assert kas_permissions.withhold_hook_gated_auto_approval(None, ("*",)) is None
+
+
+def test_a_hook_on_one_mcp_tool_withholds_only_that_tool():
+    # A hook guarding one MCP tool must not make every other MCP tool prompt.
+    policy = {"rules": [{"capability": "mcp", "match": ["srv/*", "docs/*"], "effect": "allow"}]}
+    audited: list = []
+    out = kas_permissions.withhold_hook_gated_auto_approval(
+        policy,
+        ("@srv/get_creds",),
+        audit_decision=lambda refs, outcome, reason: audited.append((refs, outcome)),
+    )
+    assert out["rules"][1:] == [
+        {"capability": "mcp", "match": ["???/???_?????", "srv/get_creds"], "effect": "ask"}
+    ]
+    assert not any(r.get("effect") == "ask" and not r.get("match") for r in out["rules"])
+    assert audited == [("@srv/get_creds", "withheld")]
+    # The rest of MCP stays auto-approved, and the hooked tool is held back.
+    approved = kas_permissions.auto_approved_capabilities(out)
+    assert approved == {"mcp", "mcp-held:srv/get_creds", "mcp-held:???/???_?????"}
+
+
+@pytest.mark.parametrize("matcher", ["@srv/Get_Creds", "@SRV/GET_CREDS", "mcp__Srv__get_CREDS"])
+def test_a_mixed_case_mcp_matcher_still_holds_the_real_tool(matcher):
+    # The hook store matches case-insensitively, so `@srv/Get_Creds` guards the real
+    # `get_creds`. The ask must reach that tool even if KAS compares case, or the
+    # call is auto-approved and the hook never sees it.
+    policy = {"rules": [{"capability": "mcp", "match": ["srv/*"], "effect": "allow"}]}
+    out = kas_permissions.withhold_hook_gated_auto_approval(policy, (matcher,))
+    asks = [
+        p
+        for r in out["rules"]
+        if r["effect"] == "ask" and r["capability"] == "mcp"
+        for p in r["match"]
+    ]
+    assert any(fnmatch.fnmatchcase("srv/get_creds", p) for p in asks)
+    assert not any(fnmatch.fnmatchcase("srv/search", p) for p in asks)
+
+
+def test_a_hook_that_covers_all_of_mcp_still_asks_for_all_of_it():
+    policy = {"rules": [{"capability": "mcp", "match": ["srv/*"], "effect": "allow"}]}
+    out = kas_permissions.withhold_hook_gated_auto_approval(policy, ("@srv/get_creds", "*_x"))
+    assert {"capability": "mcp", "effect": "ask"} in out["rules"]
+    assert not any(r.get("match") == ["srv/get_creds"] for r in out["rules"])
+    assert "mcp" not in kas_permissions.auto_approved_capabilities(out)
+
+
+@pytest.mark.parametrize(
+    ("covered", "approved", "still"),
+    [
+        ({"mcp:srv/t"}, {"mcp"}, {"mcp:srv/t"}),
+        ({"mcp:srv/t"}, {"mcp", "mcp-held:srv/t"}, set()),
+        ({"mcp:srv/t"}, {"mcp", "mcp-held:srv/other"}, {"mcp:srv/t"}),
+        ({"mcp:srv/t"}, {"mcp-held:srv/t"}, set()),
+        ({"mcp:srv/t"}, set(), set()),
+        ({"web_fetch", "mcp"}, {"mcp"}, {"mcp"}),
+    ],
+)
+def test_which_hook_coverage_a_live_batch_still_auto_approves(covered, approved, still):
+    assert kas_permissions.hook_gated_auto_approved(covered, approved) == still
 
 
 def test_the_projection_withholds_what_a_pre_tool_hook_covers():
@@ -1193,6 +1257,35 @@ def test_a_new_hook_on_an_auto_approved_capability_makes_the_session_stale(agent
     assert asyncio.run(spec_hooks.hook_projection_stale(live, "a1")) is False
     _add_hooks_page_hook(hooks_page, "web_fetch")
     assert asyncio.run(spec_hooks.hook_projection_stale(live, "a1")) is True
+
+
+def test_a_per_tool_mcp_hook_is_stale_only_until_its_ask_is_projected(agents_dir, hooks_page):
+    # The batch the projection sends for a hook on one MCP tool reads fresh, so the
+    # session is not reset on every turn; a hook on another MCP tool reads stale.
+    _write_spec(agents_dir, "a1", allowedTools=["@srv"])
+    _add_hooks_page_hook(hooks_page, "@srv/get_creds")
+    matchers = kas_agents.pre_tool_hook_matchers("a1", {"allowedTools": ["@srv"]})
+    entry = kas_agents.to_client_custom_agent(
+        "a1", {"allowedTools": ["@srv"]}, "p", pre_tool_hook_matchers=matchers
+    )
+    projected = kas_agents.projected_auto_approved([entry], "a1")
+    assert "mcp" in projected
+    assert (
+        asyncio.run(spec_hooks.hook_projection_stale(_live(ACP_BACKEND_KAS, projected), "a1"))
+        is False
+    )
+    unhooked = kas_agents.projected_auto_approved(
+        [kas_agents.to_client_custom_agent("a1", {"allowedTools": ["@srv"]}, "p")], "a1"
+    )
+    assert (
+        asyncio.run(spec_hooks.hook_projection_stale(_live(ACP_BACKEND_KAS, unhooked), "a1"))
+        is True
+    )
+    _add_hooks_page_hook(hooks_page, "@srv/delete_all")
+    assert (
+        asyncio.run(spec_hooks.hook_projection_stale(_live(ACP_BACKEND_KAS, projected), "a1"))
+        is True
+    )
 
 
 def test_a_new_spec_hook_makes_the_session_stale(agents_dir, hooks_page):

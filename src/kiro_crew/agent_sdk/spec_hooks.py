@@ -1245,18 +1245,22 @@ async def hook_projection_stale(provider: object, agent_id: str) -> bool:
         # circular import: the ACP layer imports the config loader, which sits
         # below this module; resolved at call time like the other seams here.
         from kiro_crew.acp.kas_agents import pre_tool_hook_matchers
-        from kiro_crew.acp.kas_permissions import hook_gated_capabilities
+        from kiro_crew.acp.kas_permissions import (
+            hook_gated_auto_approved,
+            hook_gated_capabilities,
+        )
 
         # A built-in mode with no spec: only the Hooks page's hooks count.
         spec = _agent_spec(agent_id, None, session_key)
-        return hook_gated_capabilities(pre_tool_hook_matchers(agent_id, spec))
+        covered = hook_gated_capabilities(pre_tool_hook_matchers(agent_id, spec))
+        return hook_gated_auto_approved(covered, approved)
 
     try:
-        covered = await asyncio.to_thread(_covered)
+        still_approved = await asyncio.to_thread(_covered)
     except Exception:  # noqa: BLE001 - re-projecting is the safe direction
         logger.warning("PreToolUse hook coverage for %r could not be read; re-projecting", agent_id)
         return True
-    return bool(covered & approved)
+    return bool(still_approved)
 
 
 #: :func:`invalidate_stale_kas_session`'s answers.

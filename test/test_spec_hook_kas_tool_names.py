@@ -220,7 +220,7 @@ def test_an_mcp_server_tool_spec_hook_withholds_mcp_auto_approval(tmp_path, monk
     spec = {"hooks": {"preToolUse": [{"matcher": "@github/create_issue", "command": "g.sh"}]}}
     matchers = kas_agents.pre_tool_hook_matchers("a1", spec)
     assert matchers == ("@github/create_issue",)
-    assert hook_gated_capabilities(matchers) == {"mcp"}
+    assert hook_gated_capabilities(matchers) == {"mcp:github/create_issue"}
 
 
 def test_a_post_tool_use_matcher_is_read_like_a_pre_tool_use_one(caplog):
