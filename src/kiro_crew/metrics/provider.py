@@ -415,6 +415,9 @@ _HISTOGRAM_BUCKETS_MS: dict[str, list[float]] = {
     # to a few ms; a stall that trips the controller is 250ms to seconds, and
     # _FAST_BUCKETS_MS (0.5ms..60s) resolves both ends.
     "kirocrew.loop.lag_ms": _FAST_BUCKETS_MS,
+    # A start-gate wait. Uncontended it is microseconds; behind a cold-start
+    # herd it reaches tens of seconds, so the startup family's 60s top fits.
+    "kirocrew.session.start_queue.wait": _STARTUP_BUCKETS_MS,
     # Observed round-trip of an escalated liveness probe the daemon ANSWERED.
     # Its range is 0-20s: the fast 2s ping missed first, but that miss can be an
     # instant connect refusal rather than a 2s timeout, so a local escalated

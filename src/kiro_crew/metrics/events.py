@@ -312,6 +312,11 @@ HOST_RSS_PEAK_MB = "kirocrew.host.rss_peak_mb"
 #: Sampled event-loop lag per ``process`` (``gateway``, ``gatewayd``).
 LOOP_LAG_MS = "kirocrew.loop.lag_ms"
 
+#: One wait per acquire at a session start gate, per closed ``gate``
+#: (``cold_start`` / ``spawn_admission`` / ``session_new``); see
+#: ``kiro_crew.turn_timing.gate_acquired``.
+START_QUEUE_WAIT = "kirocrew.session.start_queue.wait"
+
 #: One sample of the emitting process's resident set, per ``process``, taken on
 #: the adaptive controller's cadence. Distinct from the
 #: ``kirocrew.process.memory.rss_bytes`` GAUGE of the same quantity, and the
